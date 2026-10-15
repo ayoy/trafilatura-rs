@@ -29,7 +29,7 @@ jobs:
           - label: ios-sim-x64
             target: x86_64-apple-ios
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -41,7 +41,7 @@ jobs:
       - name: Build static library
         run: cargo build --manifest-path uniffi/Cargo.toml --release --target ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: swift-${{ matrix.label }}
           path: uniffi/target/${{ matrix.target }}/release/libtrafilatura_uniffi.a
@@ -51,14 +51,14 @@ jobs:
     needs: build-native
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: uniffi/
 
       # Download all native libraries
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: swift-*
           path: artifacts
@@ -147,7 +147,7 @@ jobs:
           fi
 
       # Upload XCFramework as artifact for non-tag runs (for local verification)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: TrafilaturaFFI.xcframework.zip
