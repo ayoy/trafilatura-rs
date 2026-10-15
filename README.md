@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/trafilatura.svg)](https://crates.io/crates/trafilatura)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust: 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust: 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![NuGet](https://img.shields.io/nuget/v/Trafilatura)](https://www.nuget.org/packages/Trafilatura)
 
 Extract readable content, comments, and metadata from web pages.

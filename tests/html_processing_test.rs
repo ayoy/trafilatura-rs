@@ -765,3 +765,22 @@ fn test_large_doc_performance() {
     // We simply verify the call returns (no timeout needed in Rust tests).
     let _ = extract(&html, &zero_opts());
 }
+
+/// Regression test for GitHub issue #1.
+///
+/// Nested `<a>` elements make html5ever's adoption agency move subtrees while
+/// parsing. ego-tree 0.10 left stale parent pointers on the moved nodes, so a
+/// later `detach()` in `strip_elements` panicked with `unwrap()` on `None`.
+/// Fixed by the ego-tree 0.11 upgrade; this must extract without panicking.
+#[test]
+fn test_nested_links_favor_precision_no_panic() {
+    let html = "<a><div><div></div> <div><a>";
+    let opts = {
+        let mut o = Options::default();
+        o.config = zero_config();
+        o.focus = ExtractionFocus::FavorPrecision;
+        o
+    };
+    // The point is that this call used to panic; the result value is irrelevant.
+    let _ = extract(html, &opts);
+}
