@@ -55,7 +55,7 @@ Enable the `markdown` feature to convert extracted content to Markdown:
 
 ```toml
 [dependencies]
-trafilatura = { version = "0.3", features = ["markdown"] }
+trafilatura = { version = "0.4", features = ["markdown"] }
 ```
 
 ```rust
