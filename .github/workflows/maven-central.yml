@@ -25,7 +25,7 @@ jobs:
           - abi: x86_64
             target: x86_64-linux-android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -52,7 +52,7 @@ jobs:
             -o output/jniLibs \
             build --release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-${{ matrix.abi }}
           path: output/jniLibs/${{ matrix.abi }}/libtrafilatura_uniffi.so
@@ -62,19 +62,19 @@ jobs:
     needs: build-native
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: uniffi/
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
 
       # Download all native libraries
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: android-*
           path: artifacts
@@ -149,7 +149,7 @@ jobs:
           echo "All 3 ABIs present and valid"
 
       # Upload AAR as artifact for non-tag runs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: trafilatura-aar

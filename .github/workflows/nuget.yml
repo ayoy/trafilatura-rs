@@ -40,7 +40,7 @@ jobs:
             rid: win-arm64
             lib: trafilatura_uniffi.dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -60,7 +60,7 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.rid == 'linux-arm64' && 'aarch64-linux-gnu-gcc' || '' }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.rid }}
           path: uniffi/target/${{ matrix.target }}/release/${{ matrix.lib }}
@@ -70,17 +70,17 @@ jobs:
     needs: build-native
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: uniffi/
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0'
 
       # Download all native libraries from the matrix build
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: nuget/runtimes
@@ -139,7 +139,7 @@ jobs:
           fi
           dotnet pack nuget/Trafilatura.csproj -c Release -o nuget/out -p:Version=$VERSION
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nuget-package
           path: nuget/out/*.nupkg
