@@ -1,0 +1,12 @@
+# Normalize line endings: LF in repo and on checkout everywhere.
+# Windows CI runners default to core.autocrlf=true, which would rewrite
+# test fixtures (HTML corpus) to CRLF and break extraction comparisons.
+* text=auto eol=lf
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
