@@ -354,11 +354,12 @@ fn time_element_dates(doc: &Document) -> Option<NaiveDate> {
 }
 
 /// Tries full text content and `title` attribute of each element in order
-/// (upstream `otherElements`; full subtree text like lxml `text_content()`).
+/// (upstream `otherElements`; full subtree text like lxml `text_content()`
+/// over the pruned tree).
 fn first_element_date(doc: &Document, elements: &[NodeId]) -> Option<NaiveDate> {
     for &id in elements {
         for text in [
-            doc.text_content(id),
+            pruned_text_content(doc, id, 0),
             doc.get_attribute(id, "title").unwrap_or_default(),
         ] {
             let normalized = normalize(&text);
@@ -379,6 +380,27 @@ fn first_element_date(doc: &Document, elements: &[NodeId]) -> Option<NaiveDate> 
 // Depth cap for the recursive DOM walks in this module, matching the
 // parser's MAX_TREE_DEPTH so pathological nesting cannot overflow the stack.
 const MAX_WALK_DEPTH: usize = 500;
+
+/// Subtree text like [`Document::text_content`], but skipping
+/// embedded/foreign subtrees: upstream removes unwanted elements from
+/// the tree before the DOM scanning stages, so their text is invisible
+/// to those stages.
+fn pruned_text_content(doc: &Document, id: NodeId, depth: usize) -> String {
+    if depth >= MAX_WALK_DEPTH {
+        return String::new();
+    }
+    let mut text = String::new();
+    for child in doc.child_nodes(id) {
+        if doc.is_element(child) {
+            if !is_unwanted(doc, child) {
+                text.push_str(&pruned_text_content(doc, child, depth + 1));
+            }
+        } else if doc.is_text(child) {
+            text.push_str(&doc.text_content(child));
+        }
+    }
+    text
+}
 
 /// Walks elements in document order, skipping embedded/foreign subtrees
 /// (upstream removes these before the DOM scanning stages), collecting
@@ -911,7 +933,9 @@ impl Reference {
     fn observe_unix(&mut self, seconds: i64) {
         if let Some(datetime) = chrono::DateTime::from_timestamp(seconds, 0) {
             let date = datetime.date_naive();
-            if self.date.is_none_or(|best| date > best) {
+            // Same plausibility window as every other candidate
+            // (upstream `reference_date` builds via `date_from_parts`).
+            if super::is_plausible_date(date) && self.date.is_none_or(|best| date > best) {
                 self.date = Some(date);
             }
         }
@@ -1020,6 +1044,7 @@ static MONTHS: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
         ("şub", 2),
         ("march", 3),
         ("märz", 3),
+        ("mär", 3),
         ("maerz", 3),
         ("maret", 3),
         ("mars", 3),
@@ -1079,6 +1104,7 @@ static MONTHS: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
         ("nov", 11),
         ("kas", 11),
         ("december", 12),
+        ("desember", 12),
         ("dezember", 12),
         ("décembre", 12),
         ("decembre", 12),
@@ -1316,5 +1342,46 @@ mod tests {
         // Runner-up at 1/3 frequency loses to the newest.
         let picked = select(vec![pattern("2019", 3), pattern("2015", 1)], year_itself);
         assert_eq!(picked.map(|p| p.text), Some("2019".to_string()));
+    }
+
+    /// Upstream removes embedded/foreign subtrees from the tree before the
+    /// DOM scanning stages, so a selected date element's text must not
+    /// include text hidden inside e.g. `<svg>`.
+    #[test]
+    fn date_element_text_excludes_unwanted_subtrees() {
+        let document =
+            doc(r#"<div class="date"><svg><text>2000-01-01 </text></svg>2020-06-15</div>"#);
+        assert_eq!(
+            date_elements(&document, false),
+            NaiveDate::from_ymd_opt(2020, 6, 15)
+        );
+    }
+
+    /// Unix timestamps feed the same plausibility window as other dates
+    /// (upstream `reference_date` routes them through `date_from_parts`).
+    #[test]
+    fn unix_timestamps_must_be_plausible() {
+        // Epoch and far-future stamps are implausible years: ignored.
+        let document = doc(r#"<abbr data-utime="0"></abbr>"#);
+        assert_eq!(abbr_dates(&document), None);
+        let document = doc(r#"<abbr data-utime="4102444800"></abbr>"#); // 2100-01-01
+        assert_eq!(abbr_dates(&document), None);
+        // A plausible stamp still parses.
+        let document = doc(r#"<abbr data-utime="1560556800"></abbr>"#); // 2019-06-15
+        assert_eq!(abbr_dates(&document), NaiveDate::from_ymd_opt(2019, 6, 15));
+    }
+
+    /// Every string `MONTH_NAMES` can match must have a `MONTHS` entry —
+    /// `Mär` (DE abbreviation) and `Desember` (ID) were missing.
+    #[test]
+    fn month_name_parse_covers_map_gaps() {
+        assert_eq!(
+            parse_candidate("13 Mär 2019"),
+            NaiveDate::from_ymd_opt(2019, 3, 13)
+        );
+        assert_eq!(
+            parse_candidate("13 Desember 2019"),
+            NaiveDate::from_ymd_opt(2019, 12, 13)
+        );
     }
 }
