@@ -120,10 +120,19 @@ const IGNORABLE_WORDS: [&str; 13] = [
     "about", "ad", "and", "at", "by", "from", "just", "nd", "of", "on", "rd", "st", "the",
 ];
 
-/// Noise punctuation dateparser's tokenizer splits into standalone runs
-/// and drops — only `-`, `/`, `.`, `:`, `+` and space count as separators
-/// there, so they never break up a date candidate.
-const IGNORABLE_PUNCT: [char; 7] = ['\'', ',', ';', '@', '[', ']', '|'];
+/// dateparser's tokenizer is ASCII-only: ASCII digits (and `:`) form
+/// digit runs, ASCII letters form letter runs, and every other
+/// character — punctuation, symbols, and non-ASCII letters/digits like
+/// `é` or `𝑡` — forms a standalone "other" run. Runs at a token's edge
+/// never break a date candidate, so `"1-21-2019."`, `"(1-21-2019)"` or
+/// `"21st. 1 2019"` parse like their bare cores (a trailing `:` is
+/// tolerated too: upstream keeps it inside the digit run / time
+/// token). Interior separators stay intact: the separator choice still
+/// groups the numbers. (A non-ASCII letter can additionally flip
+/// upstream's locale-detected parse order — see DEVIATIONS.md.)
+fn trim_edge_noise(token: &str) -> &str {
+    token.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+}
 
 /// `"21st"` → `"21"`: dateparser splits digit and letter runs into
 /// separate tokens and drops an ordinal suffix directly after a number
@@ -145,7 +154,7 @@ fn strip_ignorable_words(text: &str) -> Option<String> {
     let stripped: Vec<String> = text
         .split_whitespace()
         .filter_map(|token| {
-            let trimmed = token.trim_matches(|c| IGNORABLE_PUNCT.contains(&c));
+            let trimmed = trim_edge_noise(token);
             if trimmed.is_empty() {
                 changed = true;
                 return None;
@@ -1670,10 +1679,18 @@ mod tests {
     }
 
     /// Stripping succeeds but the stripped text is not a date either:
-    /// the original text is retried unchanged and still rejected.
+    /// the original text is retried unchanged and still rejected (any
+    /// strip that changed the text implies prose the anchored triple
+    /// regex cannot match, so the retry can only ever confirm the
+    /// rejection — the neighboring success case shows stripping itself
+    /// still works).
     #[test]
     fn external_parse_falls_back_to_original_after_strip() {
         assert_eq!(parse_candidate("on 13 21 2019", true), None);
+        assert_eq!(
+            parse_candidate("on 13 12 2019", true),
+            NaiveDate::from_ymd_opt(2019, 12, 13)
+        );
     }
 
     /// Three-digit years fall outside every year slot (2 or 4 digits);
@@ -1700,7 +1717,9 @@ mod tests {
     }
 
     /// Noise punctuation is dropped from token edges just as dateparser's
-    /// tokenizer splits it into ignorable runs.
+    /// tokenizer splits it into ignorable runs — including separators
+    /// (`.`, `-`, `:`, …) and paired punctuation at the outermost edges,
+    /// which the anchored triple regex alone would reject.
     #[test]
     fn external_parse_strips_noise_punctuation() {
         assert_eq!(
@@ -1715,6 +1734,25 @@ mod tests {
             parse_candidate("| 1-21-2019", true),
             NaiveDate::from_ymd_opt(2019, 1, 21)
         );
+        // Separator-class characters at the very edges never break a
+        // candidate: the tokenizer splits them into standalone runs and
+        // drops them (upstream parses all of these).
+        for text in [
+            "1-21-2019.",
+            ".1-21-2019",
+            "1-21-2019-",
+            "1-21-2019:",
+            "1-21-2019 !",
+            "(1-21-2019)",
+            "—1-21-2019",
+            "\"1 21 2019\"",
+        ] {
+            assert_eq!(
+                parse_candidate(text, true),
+                NaiveDate::from_ymd_opt(2019, 1, 21),
+                "{text}"
+            );
+        }
     }
 
     /// Comma-separated triples behave like space-separated ones.
@@ -1739,6 +1777,16 @@ mod tests {
             parse_candidate("on the 21st of 1 2019", true),
             NaiveDate::from_ymd_opt(2019, 1, 21)
         );
+        // The suffix strip follows the edge-noise trim, so sentence
+        // punctuation after the ordinal does not shield it.
+        assert_eq!(
+            parse_candidate("on the 21st. 1 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("21st - 1 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
         assert_eq!(
             parse_candidate("on 1st 21 2019", true),
             NaiveDate::from_ymd_opt(2019, 1, 21)
@@ -1761,11 +1809,31 @@ mod tests {
             parse_candidate("21ST 1 2019", true),
             NaiveDate::from_ymd_opt(2019, 1, 21)
         );
-        // Multibyte tails can neither match a suffix nor split a char
-        // (the char-boundary check in strip_ordinal_suffix guards the
-        // panic case).
+        // Multibyte characters can neither match a suffix nor split a
+        // char (the char-boundary check in strip_ordinal_suffix guards
+        // the panic case — "21é2" reaches it, "21é" does not).
         assert_eq!(parse_candidate("21s\u{00e9} 1 2019", true), None);
-        assert_eq!(parse_candidate("21\u{1d461} 1 2019", true), None);
+        assert_eq!(parse_candidate("21\u{00e9}2 1 2019", true), None);
+        // Upstream's tokenizer is ASCII-only: a locale-less non-ASCII
+        // character glued to a number's edge is an ignorable "other"
+        // run and the candidate still parses (verified against
+        // rust-dateparser: 𝑡, →).
+        assert_eq!(
+            parse_candidate("21\u{1d461} 1 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        // Deviation (locale-dependent orders, DEVIATIONS.md): a locale-
+        // mapped é flips upstream to its day-first order — the same
+        // value for this trailing shape, but it rejects the leading
+        // form. We have no locale detection, so both resolve by value.
+        assert_eq!(
+            parse_candidate("21\u{00e9} 1 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("\u{00e9}1 21 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
     }
 
     /// Mixed-separator triples follow upstream's component grouping: a
@@ -1794,8 +1862,10 @@ mod tests {
             );
         }
         // With no rescuing pattern left (year outside every class), the
-        // split triple is rejected outright.
+        // split triple is rejected outright — also with a two-digit
+        // year, which no year-month pattern can rescue.
         assert_eq!(parse_candidate("21 1-1899", true), None);
+        assert_eq!(parse_candidate("21 1-19", true), None);
         // Month-first needs no flip and tolerates any separator mix.
         assert_eq!(
             parse_candidate("1 21-2019", true),

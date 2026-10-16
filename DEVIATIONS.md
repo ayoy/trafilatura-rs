@@ -95,10 +95,26 @@ month-first triples the day-first cascade cannot see (`1-21-2019`),
 comma/space triples in either order, mixed separators with a binding
 first one (`21-1 2019`), optional trailing clock time, and dateparser's
 stripping of a fixed set of English filler words (`on`, `the`, `from`, …),
-noise punctuation and ordinal suffixes (`"21st"`) before matching — so
-free text like `"on the 21st of 1 2019"` parses like `"21 1 2019"`.
-Not ported:
+edge noise punctuation (anything its tokenizer would split into an
+ignorable run: `"1-21-2019."`, `"(1-21-2019)"`) and ordinal suffixes
+(`"21st"`) before matching — so free text like `"on the 21st of 1 2019"`
+parses like `"21 1 2019"`. Not ported:
 
+- interior non-separator punctuation joining the numbers: the tokenizer
+  drops any non-alphanumeric run between digits, so upstream resolves
+  `"1@21@2019"` or `"1_21_2019"` positionally; our separator grammar
+  keeps only `-`, `/`, `.`, space and comma, so those candidates fall
+  through to the year scan. Never surfaced in the fuzz corpus (synthetic
+  separators were drawn from the realistic set).
+- non-ASCII letters whose charset maps to a locale: upstream
+  auto-detects the language from the characters and switches the parse
+  order (e.g. `é`/`Ж` → day-first), which rejects or reorders triples
+  our value-based flip still resolves (`"é1 21 2019"` → None upstream,
+  2019-01-21 here). This is the same locale-order deviation as above
+  and is independent of position — a standalone `"(é) 1 21 2019"` is
+  rejected upstream too. Locale-less non-ASCII characters (`𝑡`, `→`)
+  trim at either edge exactly like upstream. Degenerate synthetic
+  inputs only.
 - dateparser's multi-language month names and locale-dependent orders
   (e.g. `"13 maerz 2019"` or `"Maggio 13, 2019"` resolve upstream via its
   de/it locale tables; our month-name table is exactly upstream
