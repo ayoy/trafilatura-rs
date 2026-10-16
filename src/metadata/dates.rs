@@ -1063,10 +1063,24 @@ impl Reference {
     }
 
     fn observe_unix(&mut self, seconds: i64) {
-        use chrono::TimeZone;
         // Convert through the system timezone like upstream's environment
-        // zone and Python's local `datetime.fromtimestamp`.
-        if let Some(datetime) = chrono::Local.timestamp_opt(seconds, 0).single() {
+        // zone (TZ / iana_time_zone) and Python's local
+        // `datetime.fromtimestamp`. chrono::Local is unavailable on
+        // wasm32-unknown-unknown (it compiles in js-sys glue that the
+        // loader stubs out), so wasm converts as UTC there — same gate
+        // as plausible_year / is_plausible_date (DEVIATIONS.md).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.observe_unix_zoned(seconds, &chrono::Local);
+        #[cfg(target_arch = "wasm32")]
+        self.observe_unix_zoned(seconds, &chrono::Utc);
+    }
+
+    /// Zone-sensitive core of `observe_unix`; generic so tests can pin
+    /// a `FixedOffset` instead of the ambient zone (TZ cannot be pinned
+    /// portably: chrono ignores it on Windows, and mutating it races
+    /// sibling test threads).
+    fn observe_unix_zoned<Z: chrono::TimeZone>(&mut self, seconds: i64, zone: &Z) {
+        if let Some(datetime) = zone.timestamp_opt(seconds, 0).single() {
             let date = datetime.date_naive();
             // Same plausibility window as every other candidate
             // (upstream `reference_date` builds via `date_from_parts`).
@@ -1514,30 +1528,44 @@ mod tests {
         assert_eq!(abbr_dates(&document, true), None);
         let document = doc(r#"<abbr data-utime="4102444800"></abbr>"#); // 2100-01-01
         assert_eq!(abbr_dates(&document, true), None);
-        // A plausible stamp still parses. Noon UTC keeps its date in any
-        // zone within ±12 of UTC (CI runs UTC); beyond that the system-zone
-        // test below covers the conversion semantics.
-        let document = doc(r#"<abbr data-utime="1560600000"></abbr>"#); // 2019-06-15 12:00Z
-        assert_eq!(
-            abbr_dates(&document, true),
-            NaiveDate::from_ymd_opt(2019, 6, 15)
-        );
-    }
-
-    /// Unix stamps convert through the system timezone, like upstream and
-    /// Python's local `datetime.fromtimestamp`.
-    #[test]
-    fn unix_timestamp_uses_system_timezone() {
+        // A plausible stamp still parses. The local date depends on the
+        // host zone (real offsets reach UTC+14, so even noon UTC can
+        // shift a day), so expect the system-local conversion rather
+        // than an absolute date; the fixed-offset test below pins the
+        // conversion semantics against absolute dates.
         use chrono::TimeZone;
-        // 2019-06-15T00:00:00Z is still 2019-06-14 anywhere west of UTC.
-        let seconds = 1_560_556_800i64;
+        let seconds = 1_560_600_000i64; // 2019-06-15 12:00Z
         let expected = chrono::Local
             .timestamp_opt(seconds, 0)
             .single()
             .unwrap()
             .date_naive();
-        let document = doc(r#"<abbr data-utime="1560556800"></abbr>"#);
+        let document = doc(r#"<abbr data-utime="1560600000"></abbr>"#);
         assert_eq!(abbr_dates(&document, true), Some(expected));
+    }
+
+    /// Unix stamps convert through a timezone, like upstream's environment
+    /// zone and Python's local `datetime.fromtimestamp`.
+    #[test]
+    fn unix_timestamp_uses_system_timezone() {
+        // The zone-sensitive conversion lives in observe_unix_zoned;
+        // exercise it at the seam with a fixed offset — deterministic
+        // on every host and CI platform, unlike pinning TZ (chrono
+        // ignores TZ on Windows, and mutating it races sibling test
+        // threads). UTC-4 is New York daylight time: midnight UTC is
+        // still 20:00 the previous day there, noon UTC keeps its date.
+        let edt = chrono::FixedOffset::east_opt(-4 * 3600).unwrap();
+        let mut reference = Reference::default();
+        reference.observe_unix_zoned(1_560_556_800, &edt); // 2019-06-15T00:00Z
+        assert_eq!(reference.finish(), NaiveDate::from_ymd_opt(2019, 6, 14));
+        let mut reference = Reference::default();
+        reference.observe_unix_zoned(1_560_600_000, &edt); // 2019-06-15T12:00Z
+        assert_eq!(reference.finish(), NaiveDate::from_ymd_opt(2019, 6, 15));
+        // The plausibility window applies after conversion: epoch is
+        // 1970 even in the most eastern zone.
+        let mut reference = Reference::default();
+        reference.observe_unix_zoned(0, &edt);
+        assert_eq!(reference.finish(), None);
     }
 
     /// Upstream gates the external-parser fallback behind extensive search:

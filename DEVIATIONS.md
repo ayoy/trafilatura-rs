@@ -129,6 +129,14 @@ parses like `"21 1 2019"`. Not ported:
   where upstream's answer changes with the calendar. Affects the
   remaining ~198 fuzz cases, all synthetic degenerate inputs.
 
+Known approximation (unix stamps): `<abbr data-utime>` stamps
+convert through the system timezone on native targets, like upstream's
+environment zone (TZ / iana_time_zone) and Python's local
+`datetime.fromtimestamp`. On wasm32-unknown-unknown `chrono::Local` is
+unavailable (its js-sys glue is stubbed out by the JS loader), so wasm
+builds convert as UTC — same gate as the `Local::now()` plausibility
+windows elsewhere in the crate.
+
 Known approximation: the date-element selector reads `id`/`class`/
 `itemprop` attributes the way upstream does, but upstream takes the first
 attribute *present* in source order while our DOM (scraper default
