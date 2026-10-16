@@ -69,13 +69,34 @@ ISO 639-3 → 639-1 mapping table bridges available languages.
 
 ## Date Extraction
 
-### `HtmlDateMode::Extensive` not yet implemented
+### Full htmldate cascade (port of rust-htmldate / htmldate)
 
-The variant exists (matching Go's API) but behaves identically to `Fast`.
-Full body-text date scanning will be added when the `htmldate` integration
-is ported.
+Date extraction is a port of the [rust-htmldate](https://crates.io/crates/rust-htmldate)
+cascade (itself a port of Python's htmldate, Apache-2.0): meta elements,
+JSON-LD, `<abbr>`, date-ish elements, `<title>`/`<h1>`, `<time>`, ISO
+timestamps, og:image URLs, idiosyncratic "posted on" patterns, free-text
+snippets, and a final raw-HTML scan (incl. copyright-year fallback), all
+with newest-wins semantics (`UseOriginalDate = false`, the default).
 
-**Files**: `src/options.rs`
+On the 113-file test corpus this matches rust-htmldate 1.10.2 on every
+file but one; the remaining difference (caktusgroup) is intentional:
+like Python trafilatura, we feed `og:url`/canonical as the page URL and a
+date in that URL path wins over later stages — rust-htmldate only sees
+the URL the caller passes it.
+
+`HtmlDateMode::Extensive` (the default) runs the full cascade;
+`HtmlDateMode::Fast` restricts to meta + JSON-LD and the fast date-element
+subset, as before.
+
+Known approximation: the date-element selector reads `id`/`class`/
+`itemprop` attributes the way upstream does, but upstream takes the first
+attribute *present* in source order while our DOM (scraper default
+features) sorts attributes alphabetically, losing source order. We check
+all present attributes, which is over-inclusive when an element's
+non-first attribute carries a date hint; a real corpus shows this loses
+fewer dates than any deterministic ordering of the sorted attributes.
+
+**Files**: `src/metadata/dates.rs`, `src/metadata/mod.rs`
 
 ## Output Format
 

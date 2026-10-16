@@ -1,5 +1,6 @@
 // Port of go-trafilatura/metadata.go
 
+pub mod dates;
 pub mod json_ld;
 
 use std::collections::HashSet;
@@ -257,17 +258,6 @@ static ATTR_MODIFIED_NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
-/// itemprop values for original publication date.
-static ITEM_PROP_ORIGINAL: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    ["datecreated", "datepublished", "pubyear"]
-        .into_iter()
-        .collect()
-});
-
-/// itemprop values for modified date.
-static ITEM_PROP_MODIFIED: LazyLock<HashSet<&'static str>> =
-    LazyLock::new(|| ["datemodified", "dateupdate"].into_iter().collect());
-
 /// Regex for extracting YYYY-MM-DD (with -, /, . separators) from a string.
 /// Port of rxYmdPattern in go-htmldate.
 static DATE_YMD_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -359,9 +349,19 @@ pub fn extract_metadata(doc: &Document, opts: &Options) -> Metadata {
         // Caller opted out of date extraction.
         None
     } else {
-        // Default / Fast / Extensive: use meta + JSON-LD (Extensive is not yet implemented,
-        // so it falls back to the same fast path as Default and Fast).
-        extract_date(doc)
+        // Default / Extensive: full htmldate cascade (meta, JSON-LD, <time>,
+        // <abbr>, date-ish elements, free text, raw-HTML scan). Fast: meta +
+        // JSON-LD only, as before.
+        let extensive = !matches!(opts.html_date_mode, HtmlDateMode::Fast);
+        // Python trafilatura passes metadata.url (og:url/canonical, else the
+        // fetch URL) to htmldate.find_date, which short-circuits on a URL
+        // date before checking meta elements.
+        let url = if !metadata.url.is_empty() {
+            Some(metadata.url.clone())
+        } else {
+            opts.original_url.as_ref().map(|u| u.to_string())
+        };
+        dates::extract_date(doc, url.as_deref(), extensive)
     };
 
     // Sitename fallback via DOM.
@@ -971,22 +971,16 @@ pub(crate) fn remove_excluded_authors(current: &str, opts: &Options) -> String {
 // Date extraction (port of go-htmldate fast mode)
 // ---------------------------------------------------------------------------
 
-/// Top-level date extraction. Tries meta elements, then JSON-LD.
-///
-/// Mirrors go-htmldate's `findDate` in fast/UseOriginalDate=true mode.
-fn extract_date(doc: &Document) -> Option<chrono::NaiveDate> {
-    // 1. Meta elements (examineMetaElements equivalent)
-    if let Some(d) = examine_meta_date(doc) {
-        return Some(d);
-    }
-    // 2. JSON-LD (jsonSearch equivalent)
-    json_search_date(doc)
-}
+// The top-level cascade lives in `dates.rs`; the meta-element and JSON-LD
+// stages below are shared with it.
 
 /// Scans `<meta>` elements for date cues.
 ///
-/// Port of `examineMetaElements` from go-htmldate, UseOriginalDate=true.
-fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
+/// Port of `examineMetaElements` from go-htmldate/rust-htmldate with
+/// UseOriginalDate=false (the default in both rust-htmldate and Python
+/// trafilatura): modified names/properties win over original ones, which
+/// become reserves; values go through the full `tryDate` pipeline.
+pub(super) fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
     let mut reserve: Option<chrono::NaiveDate> = None;
 
     for node_id in doc.query_selector_all(doc.root(), "meta") {
@@ -1022,42 +1016,29 @@ fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
 
+        let mut primary = None;
         if !name.is_empty() && !content.is_empty() {
             if name == "og:url" {
                 // Extract date from URL path and store as reserve candidate.
-                // Port of the og:url branch in go-htmldate/core.go (examineMetaElements).
-                if reserve.is_none() {
-                    reserve = extract_url_date(val);
-                }
+                reserve = extract_url_date(val);
             } else if DATE_ATTRIBUTES.contains(name.as_str()) {
-                // name in dateAttributes → always main date (UseOriginalDate=true)
-                if let Some(d) = fast_parse_date(val) {
-                    return Some(d);
-                }
+                // Original date name → primary (regardless of mode).
+                primary = dates::parse_candidate(val);
             } else if ATTR_MODIFIED_NAMES.contains(name.as_str()) {
-                // modified name → reserve for UseOriginalDate=true
-                if reserve.is_none() {
-                    reserve = fast_parse_date(val);
-                }
+                // Modified name → primary with UseOriginalDate=false.
+                primary = dates::parse_candidate(val);
             }
         } else if !property.is_empty() && !content.is_empty() {
-            let in_date = DATE_ATTRIBUTES.contains(property.as_str());
-            let in_mod = PROPERTY_MODIFIED.contains(property.as_str());
-            if property == "og:url" {
-                // Extract date from URL path and store as reserve candidate.
-                // Port of the og:url branch in go-htmldate/core.go (examineMetaElements).
-                if reserve.is_none() {
-                    reserve = extract_url_date(val);
-                }
-            } else if in_date {
-                // dateAttributes property → main date (UseOriginalDate=true)
-                if let Some(d) = fast_parse_date(val) {
-                    return Some(d);
-                }
-            } else if in_mod {
-                // modified property → reserve
-                if reserve.is_none() {
-                    reserve = fast_parse_date(val);
+            let original = DATE_ATTRIBUTES.contains(property.as_str());
+            let modified = PROPERTY_MODIFIED.contains(property.as_str());
+            if original || modified {
+                if let Some(d) = dates::parse_candidate(val) {
+                    if modified {
+                        // Modified property → primary with UseOriginalDate=false.
+                        primary = Some(d);
+                    } else {
+                        reserve = Some(d);
+                    }
                 }
             }
         } else if !itemprop.is_empty() {
@@ -1066,35 +1047,37 @@ fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
             } else {
                 &content
             };
-            if !attr_val.is_empty() {
-                if ITEM_PROP_ORIGINAL.contains(itemprop.as_str()) {
-                    // itemPropOriginal → main date (UseOriginalDate=true)
-                    if let Some(d) = fast_parse_date(attr_val) {
-                        return Some(d);
-                    }
-                } else if ITEM_PROP_MODIFIED.contains(itemprop.as_str()) {
-                    // itemPropModified → reserve for UseOriginalDate=true
-                    if reserve.is_none() {
-                        reserve = fast_parse_date(attr_val);
+            // With UseOriginalDate=false, original itemprops contribute
+            // nothing; only modified and copyrightyear are considered.
+            let modified = matches!(itemprop.as_str(), "datemodified" | "dateupdate");
+            if modified {
+                // Modified itemprop → primary with UseOriginalDate=false.
+                if !attr_val.is_empty() {
+                    primary = dates::parse_candidate(attr_val);
+                }
+            } else if itemprop == "copyrightyear" && content.len() == 4 {
+                // Copyright year → reserve (upstream examineMetaElements).
+                if let Ok(year) = content.parse::<i32>() {
+                    if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, 1, 1) {
+                        if is_plausible_date(date) {
+                            reserve = Some(date);
+                        }
                     }
                 }
             }
         } else if pubdate == "pubdate" && !content.is_empty() {
-            if let Some(d) = fast_parse_date(val) {
-                return Some(d);
-            }
+            primary = dates::parse_candidate(val);
         } else if !http_equiv.is_empty() && !content.is_empty() {
-            if http_equiv == "date" {
-                // UseOriginalDate=true → main date
-                if let Some(d) = fast_parse_date(val) {
-                    return Some(d);
-                }
-            } else if http_equiv == "last-modified" {
-                // UseOriginalDate=true → reserve
-                if reserve.is_none() {
-                    reserve = fast_parse_date(val);
-                }
+            if http_equiv == "last-modified" {
+                // (equiv == "date") == use_original_date → last-modified is
+                // primary with UseOriginalDate=false.
+                primary = dates::parse_candidate(val);
+            } else if http_equiv == "date" {
+                reserve = dates::parse_candidate(val);
             }
+        }
+        if let Some(d) = primary {
+            return Some(d);
         }
     }
 
@@ -1103,80 +1086,87 @@ fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
 
 /// Scans JSON-LD `<script>` blocks for date fields.
 ///
-/// Port of `jsonSearch` from go-htmldate, UseOriginalDate=true (picks earliest datePublished/dateCreated).
-fn json_search_date(doc: &Document) -> Option<chrono::NaiveDate> {
+/// Port of `jsonSearch` from rust-htmldate with UseOriginalDate=false:
+/// `dateModified` first, then `datePublished`; the first script in
+/// document order with a parseable plausible date wins.
+pub(super) fn json_search_date(doc: &Document) -> Option<chrono::NaiveDate> {
     let sel = r#"script[type="application/ld+json"], script[type="application/settings+json"]"#;
 
-    // With UseOriginalDate=true we look for datePublished/dateCreated and pick the earliest.
-    let target_keys = ["datepublished", "datecreated"];
-
-    let mut best: Option<chrono::NaiveDate> = None;
-
+    let mut scripts: Vec<String> = Vec::new();
     for node_id in doc.query_selector_all(doc.root(), sel) {
         let text = trim(&doc.text_content(node_id));
-        if text.is_empty() {
-            continue;
-        }
-
-        // Try to parse as array first, then object.
-        let obj_list: Vec<serde_json::Map<String, serde_json::Value>> =
-            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-                arr.into_iter()
-                    .filter_map(|v| {
-                        if let serde_json::Value::Object(m) = v {
-                            Some(m)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(&text) {
-                vec![m]
-            } else {
-                continue;
-            };
-
-        for obj in obj_list {
-            collect_json_dates(&obj, &target_keys, &mut |d| {
-                if best.is_none_or(|b| d < b) {
-                    best = Some(d);
-                }
-            });
+        if !text.is_empty() {
+            scripts.push(text);
         }
     }
 
-    best
-}
+    // Modified first (UseOriginalDate=false), then published — upstream's
+    // exact key pair (case-insensitive), no extras.
+    for target_keys in [["datemodified"], ["datepublished"]] {
+        for text in &scripts {
+            let obj_list: Vec<serde_json::Map<String, serde_json::Value>> =
+                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
+                    arr.into_iter()
+                        .filter_map(|v| {
+                            if let serde_json::Value::Object(m) = v {
+                                Some(m)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(text) {
+                    vec![m]
+                } else {
+                    continue;
+                };
 
-/// Recursively walks a JSON object collecting dates for the given keys.
-fn collect_json_dates(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    target_keys: &[&str],
-    visitor: &mut impl FnMut(chrono::NaiveDate),
-) {
-    for (key, value) in obj {
-        let key_lower = key.to_lowercase();
-        match value {
-            serde_json::Value::String(s) => {
-                if target_keys.contains(&key_lower.as_str()) {
-                    if let Some(d) = fast_parse_date(s) {
-                        visitor(d);
-                    }
+            for obj in &obj_list {
+                if let Some(d) = first_json_date(obj, &target_keys) {
+                    return Some(d);
                 }
             }
+        }
+    }
+
+    None
+}
+
+/// First parseable plausible date for the given keys in document order.
+fn first_json_date(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    target_keys: &[&str],
+) -> Option<chrono::NaiveDate> {
+    for (key, value) in obj {
+        let key_lower = key.to_lowercase();
+        if let serde_json::Value::String(s) = value {
+            if target_keys.contains(&key_lower.as_str()) {
+                if let Some(d) = fast_parse_date(s) {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    for value in obj.values() {
+        match value {
             serde_json::Value::Object(nested) => {
-                collect_json_dates(nested, target_keys, visitor);
+                if let Some(d) = first_json_date(nested, target_keys) {
+                    return Some(d);
+                }
             }
             serde_json::Value::Array(arr) => {
                 for item in arr {
                     if let serde_json::Value::Object(m) = item {
-                        collect_json_dates(m, target_keys, visitor);
+                        if let Some(d) = first_json_date(m, target_keys) {
+                            return Some(d);
+                        }
                     }
                 }
             }
             _ => {}
         }
     }
+    None
 }
 
 /// Extracts a date from a URL path using the YYYY/MM/DD pattern.
@@ -1201,7 +1191,7 @@ fn extract_url_date(url: &str) -> Option<chrono::NaiveDate> {
 /// Parses a date string, returning the date component if valid.
 ///
 /// Port of `fastParse` from go-htmldate: tries ISO-8601, YYYYMMDD, and Y-M-D patterns.
-fn fast_parse_date(s: &str) -> Option<chrono::NaiveDate> {
+pub(super) fn fast_parse_date(s: &str) -> Option<chrono::NaiveDate> {
     use chrono::NaiveDate;
 
     let s = s.trim();
@@ -1233,8 +1223,8 @@ fn fast_parse_date(s: &str) -> Option<chrono::NaiveDate> {
         }
     }
 
-    // 3. Try YYYYMMDD without separator (first 8 chars all digits).
-    if s.len() >= 8 && s[..8].chars().all(|c| c.is_ascii_digit()) {
+    // 3. Try YYYYMMDD without separator (first 8 bytes all digits).
+    if s.len() >= 8 && s.as_bytes()[..8].iter().all(|b| b.is_ascii_digit()) {
         if let (Ok(y), Ok(m), Ok(d)) = (
             s[..4].parse::<i32>(),
             s[4..6].parse::<u32>(),
@@ -1284,7 +1274,7 @@ fn fast_parse_date(s: &str) -> Option<chrono::NaiveDate> {
 
 /// Returns true if the date is within the plausible range (1995 – now+1 year).
 /// Port of `validateDate` in go-htmldate.
-fn is_plausible_date(d: chrono::NaiveDate) -> bool {
+pub(super) fn is_plausible_date(d: chrono::NaiveDate) -> bool {
     let year = d.year();
     #[cfg(not(target_arch = "wasm32"))]
     let now_year = chrono::Local::now().year();
@@ -1666,9 +1656,13 @@ mod tests {
         );
     }
 
-    /// A stronger publication-time meta should win over og:url.
+    /// Python trafilatura passes og:url as htmldate's `url` parameter, and
+    /// htmldate returns a URL date *before* checking meta elements. So an
+    /// og:url with a date path beats article:published_time — this differs
+    /// from go-htmldate's standalone mode (no caller URL → og:url is only a
+    /// meta-stage reserve, so a direct meta hit would win there).
     #[test]
-    fn test_publication_meta_takes_priority_over_og_url() {
+    fn test_url_date_takes_priority_over_meta() {
         let html = r#"<html><head>
             <meta property="article:published_time" content="2020-06-01"/>
             <meta property="og:url" content="https://example.org/2017/09/01/content.html"/>
@@ -1676,12 +1670,11 @@ mod tests {
         let doc = parse(html);
         let opts = Options::default();
         let meta = extract_metadata(&doc, &opts);
-        // article:published_time is in DATE_ATTRIBUTES → always returned first (main date).
-        let expected = chrono::NaiveDate::from_ymd_opt(2020, 6, 1).unwrap();
+        let expected = chrono::NaiveDate::from_ymd_opt(2017, 9, 1).unwrap();
         assert_eq!(
             meta.date,
             Some(expected),
-            "article:published_time beats og:url reserve date"
+            "URL date from og:url takes priority (Python trafilatura semantics)"
         );
     }
 }
