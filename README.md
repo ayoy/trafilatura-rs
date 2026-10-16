@@ -224,6 +224,13 @@ cargo test --test comparison_test -- --nocapture       # Rust quality scores
 python3 scripts/compare_python.py > /dev/null          # Python quality (stderr)
 ```
 
+## Acknowledgements
+
+- **[Adrien Barbaresi](https://github.com/adbar)** for [trafilatura](https://github.com/adbar/trafilatura) and [htmldate](https://github.com/adbar/htmldate) — the original Python libraries this crate is ultimately ported from, and the source of the date-extraction algorithm ported into `src/metadata/dates.rs`.
+- **[Markus Mobius](https://github.com/markusmobius)** for [go-trafilatura](https://github.com/markusmobius/go-trafilatura) (the direct porting target), [go-htmldate](https://github.com/markusmobius/go-htmldate)/[rust-htmldate](https://github.com/markusmobius/rust-htmldate) (the Apache-2.0 Rust reference for the date cascade), and the test corpora: the 960-entry comparison dataset (serialized from go-trafilatura's `comparisonData`, itself derived from trafilatura's evaluation data) and the cached-page fixtures in `test-files/mock` used for metadata and date testing.
+
+The date-extraction port is released under Apache-2.0, matching rust-htmldate and htmldate.
+
 ## License
 
 Apache-2.0
