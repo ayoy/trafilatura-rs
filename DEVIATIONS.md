@@ -92,21 +92,26 @@ Known approximation (external fallback): the external fallback (upstream
 `external_parse`, backed by rust-dateparser) is ported as a **numeric
 surface only**:
 month-first triples the day-first cascade cannot see (`1-21-2019`),
-space/comma triples in either order, optional trailing clock time, and
-dateparser's stripping of a fixed set of English filler words (`on`, `the`,
-`from`, …) before matching — so free text like `"on 1-21-2019"` parses like
-the bare triple. Not ported:
+comma/space triples in either order, mixed separators with a binding
+first one (`21-1 2019`), optional trailing clock time, and dateparser's
+stripping of a fixed set of English filler words (`on`, `the`, `from`, …),
+noise punctuation and ordinal suffixes (`"21st"`) before matching — so
+free text like `"on the 21st of 1 2019"` parses like `"21 1 2019"`.
+Not ported:
 
 - dateparser's multi-language month names and locale-dependent orders
   (e.g. `"13 maerz 2019"` or `"Maggio 13, 2019"` resolve upstream via its
   de/it locale tables; our month-name table is exactly upstream
   rust-htmldate's own `regex_parse` table, which lacks them). Affects
-  ~36 of 13,997 differential fuzz cases.
-- junk-input quirks on day-`00` and year-`0000` triples, where dateparser
-  clamps day 0 to the 16th of the month (`"1/00/2019"` → `2019-01-16`)
-  or resolves year 0 to the current year. We return the first of the
-  month or reject the year, mirroring the rest of the cascade.
-  Affects the remaining ~198 fuzz cases, all synthetic degenerate inputs.
+  ~36 of 9,227 differential fuzz cases.
+- junk-input quirks on day-`00`, year-`0000` and year-month triples,
+  where dateparser clamps day 0 to the current day of the month
+  (`"1/00/2019"` → `2019-01-16`, i.e. the 16th on fuzz day), resolves
+  year 0 to the current year, or fills the missing day of a year-first
+  `"2019/06"` with the same current-day rule (→ `2019-06-16`). We
+  return the first of the month or reject the year — deterministic,
+  where upstream's answer changes with the calendar. Affects the
+  remaining ~198 fuzz cases, all synthetic degenerate inputs.
 
 Known approximation: the date-element selector reads `id`/`class`/
 `itemprop` attributes the way upstream does, but upstream takes the first
