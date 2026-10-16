@@ -88,6 +88,26 @@ the URL the caller passes it.
 `HtmlDateMode::Fast` restricts to meta + JSON-LD and the fast date-element
 subset, as before.
 
+Known approximation (external fallback): the external fallback (upstream
+`external_parse`, backed by rust-dateparser) is ported as a **numeric
+surface only**:
+month-first triples the day-first cascade cannot see (`1-21-2019`),
+space/comma triples in either order, optional trailing clock time, and
+dateparser's stripping of a fixed set of English filler words (`on`, `the`,
+`from`, …) before matching — so free text like `"on 1-21-2019"` parses like
+the bare triple. Not ported:
+
+- dateparser's multi-language month names and locale-dependent orders
+  (e.g. `"13 maerz 2019"` or `"Maggio 13, 2019"` resolve upstream via its
+  de/it locale tables; our month-name table is exactly upstream
+  rust-htmldate's own `regex_parse` table, which lacks them). Affects
+  ~36 of 13,997 differential fuzz cases.
+- junk-input quirks on day-`00` and year-`0000` triples, where dateparser
+  clamps day 0 to the 16th of the month (`"1/00/2019"` → `2019-01-16`)
+  or resolves year 0 to the current year. We return the first of the
+  month or reject the year, mirroring the rest of the cascade.
+  Affects the remaining ~198 fuzz cases, all synthetic degenerate inputs.
+
 Known approximation: the date-element selector reads `id`/`class`/
 `itemprop` attributes the way upstream does, but upstream takes the first
 attribute *present* in source order while our DOM (scraper default

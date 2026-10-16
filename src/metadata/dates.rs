@@ -41,14 +41,14 @@ pub(super) fn extract_date(
         return Some(date);
     }
     // 2. Meta elements and 3. JSON-LD (ported earlier from go-htmldate).
-    if let Some(date) = examine_meta_date(doc) {
+    if let Some(date) = examine_meta_date(doc, extensive) {
         return Some(date);
     }
     if let Some(date) = json_search_date(doc) {
         return Some(date);
     }
     // 4. <abbr> elements (unix stamps, published classes).
-    if let Some(date) = abbr_dates(doc) {
+    if let Some(date) = abbr_dates(doc, extensive) {
         return Some(date);
     }
     // 5. Elements whose tag/id/class/itemprop look date-ish. Upstream
@@ -57,11 +57,11 @@ pub(super) fn extract_date(
         return Some(date);
     }
     // 6. <title>/<h1> text.
-    if let Some(date) = title_dates(doc) {
+    if let Some(date) = title_dates(doc, extensive) {
         return Some(date);
     }
     // 7. <time> elements.
-    if let Some(date) = time_element_dates(doc) {
+    if let Some(date) = time_element_dates(doc, extensive) {
         return Some(date);
     }
     // 8-11 need the serialized source (the <html> element, mirroring
@@ -97,16 +97,89 @@ pub(super) fn extract_date(
 /// Parses a date out of an arbitrary text snippet (upstream `tryDate`):
 /// normalize whitespace, bound the length, guard the digit count, discard
 /// improbable strings, then try fast numeric, day-first, month-name and
-/// year-month forms. Note the discard rules reject bare four-digit years —
-/// year-only dates only surface through the raw-HTML page scan.
-pub(super) fn parse_candidate(text: &str) -> Option<NaiveDate> {
+/// year-month forms. With `extensive`, fall back to the external-parser
+/// surface (upstream `external_parse`) when all of those fail. Note the
+/// discard rules reject bare four-digit years — year-only dates only
+/// surface through the raw-HTML page scan.
+pub(super) fn parse_candidate(text: &str, extensive: bool) -> Option<NaiveDate> {
     let text = normalize(text);
     let text = limit(&text, 52);
     let digits = text.chars().filter(|c| c.is_ascii_digit()).count();
     if !(4..=18).contains(&digits) || is_discarded(text) {
         return None;
     }
-    super::fast_parse_date(text).or_else(|| extended_parse(text))
+    super::fast_parse_date(text)
+        .or_else(|| extended_parse(text))
+        .or_else(|| extensive.then(|| external_parse(text)).flatten())
+}
+
+/// English filler words whose dateparser translations are empty: the parser
+/// drops them anywhere in the input before matching (case-insensitively),
+/// which is how "on 1-21-2019" parses like the bare triple.
+const IGNORABLE_WORDS: [&str; 13] = [
+    "about", "ad", "and", "at", "by", "from", "just", "nd", "of", "on", "rd", "st", "the",
+];
+
+/// Standalone punctuation tokens dateparser discards the same way.
+const IGNORABLE_TOKENS: [&str; 7] = ["'", ",", ";", "@", "[", "]", "|"];
+
+fn strip_ignorable_words(text: &str) -> Option<String> {
+    let stripped: Vec<&str> = text
+        .split_whitespace()
+        .filter(|token| {
+            let lowered = token.to_lowercase();
+            !IGNORABLE_WORDS.contains(&lowered.as_str()) && !IGNORABLE_TOKENS.contains(token)
+        })
+        .collect();
+    if stripped.is_empty() || stripped.len() == text.split_whitespace().count() {
+        return None;
+    }
+    Some(stripped.join(" "))
+}
+
+/// The language-independent numeric surface of upstream's external
+/// parser (rust-dateparser, strict, past-preferring): month-first triples
+/// the day-first cascade structurally cannot see (its month slot tops out
+/// at 19), space/comma triples resolved in either order, an optional
+/// trailing clock time. Gated like upstream on a separator character in
+/// the text; rust-dateparser's multi-language month names stay unported.
+fn external_parse(text: &str) -> Option<NaiveDate> {
+    // Upstream's `text_date` guard: the text contains a separator
+    // (the character class `[ -/]` covers `.`, `-`, `/` and space).
+    if !text.chars().any(|c| matches!(c, ' '..='/' | ':' | '_')) {
+        return None;
+    }
+    if let Some(stripped) = strip_ignorable_words(text) {
+        if let Some(date) = external_parse(&stripped) {
+            return Some(date);
+        }
+    }
+    let caps = MDY_RE.captures(text)?;
+    let leading = caps.name("lead")?.as_str().parse::<u32>().ok()?;
+    let trailing = caps.name("trail")?.as_str().parse::<u32>().ok()?;
+    let year_text = caps.name("year")?.as_str();
+    // dateparser requires a positive year: a four-digit 0000 is invalid,
+    // while the two-digit form resolves through `correct_year`.
+    if year_text.len() == 4 && year_text.parse::<i32>().ok()? == 0 {
+        return None;
+    }
+    let year = correct_year(year_text.parse::<i32>().ok()?);
+    // Only the first separator decides: mixed-separator triples are
+    // malformed inputs with no stable upstream behavior.
+    let spaced = caps
+        .name("sep")
+        .is_some_and(|sep| sep.as_str().contains(' ') || sep.as_str().contains(','));
+    // Month-first; flip to day-first only for space/comma triples —
+    // dash/slash/dot day-first inputs were already consumed (or rejected)
+    // by the day-first cascade above.
+    let (month, day) = if leading <= 12 {
+        (leading, trailing)
+    } else if spaced {
+        (trailing, leading)
+    } else {
+        return None;
+    };
+    date_from_parts(year, month, day)
 }
 
 /// Day-first numeric, month-name and year-month forms beyond
@@ -238,12 +311,15 @@ fn idiosyncrasy_date(html: &str) -> Option<NaiveDate> {
 // ---------------------------------------------------------------------------
 
 /// `<abbr>` elements: `data-utime` unix stamps, `published` classes.
-fn abbr_dates(doc: &Document) -> Option<NaiveDate> {
+fn abbr_dates(doc: &Document, extensive: bool) -> Option<NaiveDate> {
     let elements = doc.get_elements_by_tag_name(doc.root(), "abbr");
     if elements.is_empty() || elements.len() >= 1000 {
         return None;
     }
-    let mut reference = Reference::default();
+    let mut reference = Reference {
+        extensive,
+        ..Reference::default()
+    };
     for &id in &elements {
         let utime = doc.get_attribute(id, "data-utime").unwrap_or_default();
         let utime = utime.trim();
@@ -274,7 +350,7 @@ fn abbr_dates(doc: &Document) -> Option<NaiveDate> {
     }
     reference
         .finish()
-        .or_else(|| first_element_date(doc, &elements))
+        .or_else(|| first_element_date(doc, &elements, extensive))
 }
 
 /// Elements whose tag/id/class/itemprop look date-ish (footer, byline,
@@ -292,11 +368,11 @@ fn date_elements(doc: &Document, fast: bool) -> Option<NaiveDate> {
     if elements.is_empty() || elements.len() >= 1000 {
         return None;
     }
-    first_element_date(doc, &elements)
+    first_element_date(doc, &elements, !fast)
 }
 
 /// Same treatment for `<title>`/`<h1>` text.
-fn title_dates(doc: &Document) -> Option<NaiveDate> {
+fn title_dates(doc: &Document, extensive: bool) -> Option<NaiveDate> {
     let mut elements = Vec::new();
     collect_wanted(
         doc,
@@ -308,12 +384,12 @@ fn title_dates(doc: &Document) -> Option<NaiveDate> {
     if elements.is_empty() || elements.len() >= 1000 {
         return None;
     }
-    first_element_date(doc, &elements)
+    first_element_date(doc, &elements, extensive)
 }
 
 /// `<time>` elements: `datetime` attribute (shortcut for `updated` class
 /// under newest-wins) or element text; newest date wins.
-fn time_element_dates(doc: &Document) -> Option<NaiveDate> {
+fn time_element_dates(doc: &Document, extensive: bool) -> Option<NaiveDate> {
     let mut elements = Vec::new();
     collect_wanted(
         doc,
@@ -325,7 +401,10 @@ fn time_element_dates(doc: &Document) -> Option<NaiveDate> {
     if elements.is_empty() || elements.len() >= 1000 {
         return None;
     }
-    let mut reference = Reference::default();
+    let mut reference = Reference {
+        extensive,
+        ..Reference::default()
+    };
     for &id in &elements {
         let datetime = doc.get_attribute(id, "datetime").unwrap_or_default();
         let datetime = datetime.trim();
@@ -337,7 +416,7 @@ fn time_element_dates(doc: &Document) -> Option<NaiveDate> {
         if datetime.chars().count() > 6 {
             // UseOriginalDate=false: only the "updated" class is a shortcut.
             if class == "updated" {
-                if let Some(date) = parse_candidate(datetime) {
+                if let Some(date) = parse_candidate(datetime, extensive) {
                     return Some(date);
                 }
             } else {
@@ -356,7 +435,7 @@ fn time_element_dates(doc: &Document) -> Option<NaiveDate> {
 /// Tries full text content and `title` attribute of each element in order
 /// (upstream `otherElements`; full subtree text like lxml `text_content()`
 /// over the pruned tree).
-fn first_element_date(doc: &Document, elements: &[NodeId]) -> Option<NaiveDate> {
+fn first_element_date(doc: &Document, elements: &[NodeId], extensive: bool) -> Option<NaiveDate> {
     for &id in elements {
         for text in [
             pruned_text_content(doc, id, 0),
@@ -369,7 +448,7 @@ fn first_element_date(doc: &Document, elements: &[NodeId]) -> Option<NaiveDate> 
             let shortened = limit(&normalized, 52)
                 .trim_end_matches(|c: char| !c.is_ascii_digit())
                 .to_string();
-            if let Some(date) = parse_candidate(&shortened) {
+            if let Some(date) = parse_candidate(&shortened, extensive) {
                 return Some(date);
             }
         }
@@ -511,7 +590,11 @@ fn is_free_text_tag(tag: &str) -> bool {
 /// Newest date across direct text children of free-text containers
 /// (div/h2-h4/li/p/span/time/ul), skipping embedded/foreign subtrees.
 fn free_text_date(doc: &Document) -> Option<NaiveDate> {
-    let mut reference = Reference::default();
+    // Stage 11 only runs in extensive mode.
+    let mut reference = Reference {
+        extensive: true,
+        ..Reference::default()
+    };
     walk_free_text(doc, doc.root(), &mut reference, 0);
     reference.finish()
 }
@@ -821,7 +904,8 @@ fn search_normalized(
     let mut normalized: Vec<Pattern> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
     for pattern in patterns {
-        let Some(date) = parse_candidate(&pattern.text) else {
+        // Stage 12 only runs in extensive mode.
+        let Some(date) = parse_candidate(&pattern.text, true) else {
             continue;
         };
         let key = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
@@ -918,12 +1002,15 @@ fn date_ymd_parts(pattern: &str) -> Option<NaiveDate> {
 /// with UseOriginalDate=false).
 #[derive(Default)]
 struct Reference {
+    /// Whether try-date may use the external-parser fallback
+    /// (upstream threads `options` into `Reference::text`).
+    extensive: bool,
     date: Option<NaiveDate>,
 }
 
 impl Reference {
     fn observe(&mut self, text: &str) {
-        if let Some(date) = parse_candidate(text) {
+        if let Some(date) = parse_candidate(text, self.extensive) {
             if self.date.is_none_or(|best| date > best) {
                 self.date = Some(date);
             }
@@ -931,7 +1018,10 @@ impl Reference {
     }
 
     fn observe_unix(&mut self, seconds: i64) {
-        if let Some(datetime) = chrono::DateTime::from_timestamp(seconds, 0) {
+        use chrono::TimeZone;
+        // Convert through the system timezone like upstream's environment
+        // zone and Python's local `datetime.fromtimestamp`.
+        if let Some(datetime) = chrono::Local.timestamp_opt(seconds, 0).single() {
             let date = datetime.date_naive();
             // Same plausibility window as every other candidate
             // (upstream `reference_date` builds via `date_from_parts`).
@@ -1135,6 +1225,18 @@ static DMY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:[^0-9]|^)([0-3]?[0-9])[-/.]([01]?[0-9])[-/.]([0-9]{2,4})(?:[^0-9]|$)").unwrap()
 });
 
+/// Numeric triple for [`external_parse`]: strictly anchored (dateparser
+/// is strict — surrounding prose fails), slots `[0-3]?[0-9]`, two- to
+/// four-digit year, optional clock-time tail. The order resolves by value:
+/// month-first, flipping to day-first when the leading number cannot be
+/// a month (dateparser resolves both orders).
+static MDY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?P<lead>[0-3]?[0-9])(?P<sep>[-/.]|[, ]+)(?P<trail>[0-3]?[0-9])(?P<sep2>[-/.]|[, ]+)(?P<year>[0-9]{2,4})([ ]?[0-2]?[0-9]:[0-5][0-9](:[0-5][0-9])?([ ]?(am|pm|AM|PM))?)?$",
+    )
+    .unwrap()
+});
+
 static YM_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?:[^0-9]|^)(?:(199[0-9]|20[0-3][0-9])[-/.]([01]?[0-9])|([01]?[0-9])[-/.](199[0-9]|20[0-3][0-9]))(?:[^0-9]|$)",
@@ -1182,6 +1284,7 @@ static COPYRIGHT_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 #[cfg(test)]
 mod tests {
+    use super::super::examine_meta_date;
     use super::*;
 
     fn doc(html: &str) -> Document {
@@ -1254,7 +1357,7 @@ mod tests {
         html.push_str("<time datetime='2018-08-29'></time>");
         let document = doc(&html);
         assert_eq!(
-            time_element_dates(&document),
+            time_element_dates(&document, true),
             Some(NaiveDate::from_ymd_opt(2018, 8, 29).unwrap())
         );
 
@@ -1265,7 +1368,7 @@ mod tests {
         }
         deep.push_str("<time datetime='2018-08-29'></time>");
         let document = doc(&deep);
-        assert_eq!(time_element_dates(&document), None);
+        assert_eq!(time_element_dates(&document, true), None);
         let mut elements = Vec::new();
         collect_wanted(
             &document,
@@ -1297,21 +1400,21 @@ mod tests {
     fn day_first_numeric_swaps_impossible_month() {
         // M/D/Y landing in day-first slots: month 13 is impossible, swap.
         assert_eq!(
-            parse_candidate("5/13/2019"),
+            parse_candidate("5/13/2019", true),
             NaiveDate::from_ymd_opt(2019, 5, 13)
         );
         assert_eq!(
-            parse_candidate("05/13/19"),
+            parse_candidate("05/13/19", true),
             NaiveDate::from_ymd_opt(2019, 5, 13)
         );
         // Unambiguous day-first stays as-is.
         assert_eq!(
-            parse_candidate("13/05/2019"),
+            parse_candidate("13/05/2019", true),
             NaiveDate::from_ymd_opt(2019, 5, 13)
         );
         // Ambiguous inputs remain day-first (no swap when both fit).
         assert_eq!(
-            parse_candidate("05/06/2019"),
+            parse_candidate("05/06/2019", true),
             NaiveDate::from_ymd_opt(2019, 6, 5)
         );
     }
@@ -1363,12 +1466,163 @@ mod tests {
     fn unix_timestamps_must_be_plausible() {
         // Epoch and far-future stamps are implausible years: ignored.
         let document = doc(r#"<abbr data-utime="0"></abbr>"#);
-        assert_eq!(abbr_dates(&document), None);
+        assert_eq!(abbr_dates(&document, true), None);
         let document = doc(r#"<abbr data-utime="4102444800"></abbr>"#); // 2100-01-01
-        assert_eq!(abbr_dates(&document), None);
-        // A plausible stamp still parses.
-        let document = doc(r#"<abbr data-utime="1560556800"></abbr>"#); // 2019-06-15
-        assert_eq!(abbr_dates(&document), NaiveDate::from_ymd_opt(2019, 6, 15));
+        assert_eq!(abbr_dates(&document, true), None);
+        // A plausible stamp still parses. Noon UTC keeps its date in any
+        // zone within ±12 of UTC (CI runs UTC); beyond that the system-zone
+        // test below covers the conversion semantics.
+        let document = doc(r#"<abbr data-utime="1560600000"></abbr>"#); // 2019-06-15 12:00Z
+        assert_eq!(
+            abbr_dates(&document, true),
+            NaiveDate::from_ymd_opt(2019, 6, 15)
+        );
+    }
+
+    /// Unix stamps convert through the system timezone, like upstream and
+    /// Python's local `datetime.fromtimestamp`.
+    #[test]
+    fn unix_timestamp_uses_system_timezone() {
+        use chrono::TimeZone;
+        // 2019-06-15T00:00:00Z is still 2019-06-14 anywhere west of UTC.
+        let seconds = 1_560_556_800i64;
+        let expected = chrono::Local
+            .timestamp_opt(seconds, 0)
+            .single()
+            .unwrap()
+            .date_naive();
+        let document = doc(r#"<abbr data-utime="1560556800"></abbr>"#);
+        assert_eq!(abbr_dates(&document, true), Some(expected));
+    }
+
+    /// Upstream gates the external-parser fallback behind extensive search:
+    /// fast mode never consults it.
+    #[test]
+    fn mdy_fallback_is_extensive_only() {
+        assert_eq!(parse_candidate("1-21-2019", false), None);
+        assert_eq!(
+            parse_candidate("1-21-2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        // Meta attributes flow through the same gate.
+        let document = doc(r#"<meta name="date" content="5/23/2019">"#);
+        assert_eq!(examine_meta_date(&document, false), None);
+        assert_eq!(
+            examine_meta_date(&document, true),
+            NaiveDate::from_ymd_opt(2019, 5, 23)
+        );
+    }
+
+    /// US-ordered month-first numerics with day 20-31 are invisible to the
+    /// day-first pattern (its month slot tops out at 19); upstream recovers
+    /// them through its external-parser fallback (`external_parse`).
+    #[test]
+    fn mdy_fallback_recovers_us_order_beyond_swap() {
+        assert_eq!(
+            parse_candidate("1-21-2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("5/23/2019", true),
+            NaiveDate::from_ymd_opt(2019, 5, 23)
+        );
+        assert_eq!(
+            parse_candidate("1.21.2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("12/31/2019", true),
+            NaiveDate::from_ymd_opt(2019, 12, 31)
+        );
+        // Two-digit years get the same correction as everywhere else.
+        assert_eq!(
+            parse_candidate("1-21-19", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("1-21-99", true),
+            NaiveDate::from_ymd_opt(1999, 1, 21)
+        );
+        // Space/comma-separated triples resolve month-first, falling back
+        // to day-first when the leading number cannot be a month.
+        assert_eq!(
+            parse_candidate("1 21 2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("31 12 2019", true),
+            NaiveDate::from_ymd_opt(2019, 12, 31)
+        );
+        // A trailing clock time is tolerated (strict dateparser).
+        assert_eq!(
+            parse_candidate("1/21/2019 10:30", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+    }
+
+    /// dateparser drops a fixed set of English filler words (anywhere,
+    /// case-insensitively) before parsing; mirror that for the numeric MDY
+    /// surface so "on 1-21-2019" parses like the bare triple.
+    #[test]
+    fn external_parse_strips_ignorable_words() {
+        assert_eq!(
+            parse_candidate("on 1-21-2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("the 5-23-2019 and", true),
+            NaiveDate::from_ymd_opt(2019, 5, 23)
+        );
+        assert_eq!(
+            parse_candidate("ON 1-21-2019", true),
+            NaiveDate::from_ymd_opt(2019, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("from 21.6.2019", true),
+            NaiveDate::from_ymd_opt(2019, 6, 21)
+        );
+        // Unknown words are not dropped: strict parsing rejects the text.
+        assert_eq!(parse_candidate("am 1-21-2019", true), None);
+        assert_eq!(parse_candidate("extra 1-21-2019", true), None);
+    }
+
+    /// A four-digit year of 0000 is rejected by the external parser
+    /// (dateparser requires a positive year); the two-digit form still
+    /// resolves through `correct_year`, and the day-first cascade keeps
+    /// upstream's `correct_year` behavior for 0000.
+    #[test]
+    fn mdy_fallback_rejects_four_digit_zero_year() {
+        assert_eq!(parse_candidate("1-21-0000", true), None);
+        assert_eq!(
+            parse_candidate("21-1-0000", true),
+            NaiveDate::from_ymd_opt(2000, 1, 21)
+        );
+        assert_eq!(
+            parse_candidate("1-21-00", true),
+            NaiveDate::from_ymd_opt(2000, 1, 21)
+        );
+    }
+
+    /// The fallback stays strict: months 1-12, calendar-validated days,
+    /// plausible years — and it only runs once the day-first cascade has
+    /// failed, so ambiguous triples remain day-first.
+    #[test]
+    fn mdy_fallback_rejects_invalid_parts() {
+        assert_eq!(parse_candidate("13-21-2019", true), None);
+        assert_eq!(parse_candidate("0/21/2019", true), None);
+        assert_eq!(parse_candidate("11/31/2019", true), None);
+        assert_eq!(parse_candidate("2/29/2019", true), None);
+        assert_eq!(parse_candidate("1-21-1518", true), None);
+        // Neither slot can be a month.
+        assert_eq!(parse_candidate("13 21 2019", true), None);
+        assert_eq!(
+            parse_candidate("2/29/2020", true),
+            NaiveDate::from_ymd_opt(2020, 2, 29)
+        );
+        assert_eq!(
+            parse_candidate("1-5-2019", true),
+            NaiveDate::from_ymd_opt(2019, 5, 1)
+        );
     }
 
     /// Every string `MONTH_NAMES` can match must have a `MONTHS` entry —
@@ -1376,11 +1630,11 @@ mod tests {
     #[test]
     fn month_name_parse_covers_map_gaps() {
         assert_eq!(
-            parse_candidate("13 Mär 2019"),
+            parse_candidate("13 Mär 2019", true),
             NaiveDate::from_ymd_opt(2019, 3, 13)
         );
         assert_eq!(
-            parse_candidate("13 Desember 2019"),
+            parse_candidate("13 Desember 2019", true),
             NaiveDate::from_ymd_opt(2019, 12, 13)
         );
     }

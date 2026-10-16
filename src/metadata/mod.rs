@@ -980,7 +980,7 @@ pub(crate) fn remove_excluded_authors(current: &str, opts: &Options) -> String {
 /// UseOriginalDate=false (the default in both rust-htmldate and Python
 /// trafilatura): modified names/properties win over original ones, which
 /// become reserves; values go through the full `tryDate` pipeline.
-pub(super) fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
+pub(super) fn examine_meta_date(doc: &Document, extensive: bool) -> Option<chrono::NaiveDate> {
     let mut reserve: Option<chrono::NaiveDate> = None;
 
     for node_id in doc.query_selector_all(doc.root(), "meta") {
@@ -1023,16 +1023,16 @@ pub(super) fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
                 reserve = extract_url_date(val);
             } else if DATE_ATTRIBUTES.contains(name.as_str()) {
                 // Original date name → primary (regardless of mode).
-                primary = dates::parse_candidate(val);
+                primary = dates::parse_candidate(val, extensive);
             } else if ATTR_MODIFIED_NAMES.contains(name.as_str()) {
                 // Modified name → primary with UseOriginalDate=false.
-                primary = dates::parse_candidate(val);
+                primary = dates::parse_candidate(val, extensive);
             }
         } else if !property.is_empty() && !content.is_empty() {
             let original = DATE_ATTRIBUTES.contains(property.as_str());
             let modified = PROPERTY_MODIFIED.contains(property.as_str());
             if original || modified {
-                if let Some(d) = dates::parse_candidate(val) {
+                if let Some(d) = dates::parse_candidate(val, extensive) {
                     if modified {
                         // Modified property → primary with UseOriginalDate=false.
                         primary = Some(d);
@@ -1053,7 +1053,7 @@ pub(super) fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
             if modified {
                 // Modified itemprop → primary with UseOriginalDate=false.
                 if !attr_val.is_empty() {
-                    primary = dates::parse_candidate(attr_val);
+                    primary = dates::parse_candidate(attr_val, extensive);
                 }
             } else if itemprop == "copyrightyear" && content.len() == 4 {
                 // Copyright year → reserve (upstream examineMetaElements).
@@ -1066,14 +1066,14 @@ pub(super) fn examine_meta_date(doc: &Document) -> Option<chrono::NaiveDate> {
                 }
             }
         } else if pubdate == "pubdate" && !content.is_empty() {
-            primary = dates::parse_candidate(val);
+            primary = dates::parse_candidate(val, extensive);
         } else if !http_equiv.is_empty() && !content.is_empty() {
             if http_equiv == "last-modified" {
                 // (equiv == "date") == use_original_date → last-modified is
                 // primary with UseOriginalDate=false.
-                primary = dates::parse_candidate(val);
+                primary = dates::parse_candidate(val, extensive);
             } else if http_equiv == "date" {
-                reserve = dates::parse_candidate(val);
+                reserve = dates::parse_candidate(val, extensive);
             }
         }
         if let Some(d) = primary {
