@@ -114,9 +114,12 @@ pub(super) fn parse_candidate(text: &str) -> Option<NaiveDate> {
 fn extended_parse(text: &str) -> Option<NaiveDate> {
     // Day-first numeric: D.M.YYYY / D-M-YY / D. M . YYYY (upstream `ymd` alt).
     if let Some(caps) = DMY_RE.captures(text) {
-        let day = caps[1].parse::<u32>().ok()?;
-        let month = caps[2].parse::<u32>().ok()?;
+        let mut day = caps[1].parse::<u32>().ok()?;
+        let mut month = caps[2].parse::<u32>().ok()?;
         let year = correct_year(caps[3].parse::<i32>().ok()?);
+        // Recover US-ordered dates when the month slot cannot be a month
+        // (upstream `swap_parts`).
+        swap_parts(&mut day, &mut month);
         if let Some(date) = date_from_parts(year, month, day) {
             return Some(date);
         }
@@ -969,6 +972,12 @@ fn swap_parts(day: &mut u32, month: &mut u32) {
 /// Simplified ASCII version of upstream's `discard` regex: rejects clock
 /// times, strings that are exactly four bare digits (bare years must come
 /// from the page scan instead), currency/stock/URL fragments.
+///
+/// Deliberately dropped from upstream's alternation: phone numbers with a
+/// leading `+NN`, 3- and 5-digit number groups, the word-boundary after the
+/// TLD alternative, extra currency symbols (`Ұ฿₱₽`), and non-ASCII digit
+/// classes — the net effect is mildly more permissive on free-text
+/// candidates, which only widens the newest-wins candidate pool.
 fn is_discarded(text: &str) -> bool {
     static DISCARD: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         [
@@ -1254,5 +1263,58 @@ mod tests {
             og_image_date(&document),
             NaiveDate::from_ymd_opt(2019, 6, 1)
         );
+    }
+
+    /// Day-first numeric parsing recovers US-ordered dates when the month
+    /// slot cannot be a month (upstream `swap_parts`).
+    #[test]
+    fn day_first_numeric_swaps_impossible_month() {
+        // M/D/Y landing in day-first slots: month 13 is impossible, swap.
+        assert_eq!(
+            parse_candidate("5/13/2019"),
+            NaiveDate::from_ymd_opt(2019, 5, 13)
+        );
+        assert_eq!(
+            parse_candidate("05/13/19"),
+            NaiveDate::from_ymd_opt(2019, 5, 13)
+        );
+        // Unambiguous day-first stays as-is.
+        assert_eq!(
+            parse_candidate("13/05/2019"),
+            NaiveDate::from_ymd_opt(2019, 5, 13)
+        );
+        // Ambiguous inputs remain day-first (no swap when both fit).
+        assert_eq!(
+            parse_candidate("05/06/2019"),
+            NaiveDate::from_ymd_opt(2019, 6, 5)
+        );
+    }
+
+    /// Two-digit-year slashes flow through `page_date`'s `search_normalized`
+    /// into `parse_candidate`, so the swap applies there too.
+    #[test]
+    fn page_date_slashes_recover_swapped_order() {
+        let html = "<p>posted on 05/13/19 by bob</p>";
+        assert_eq!(page_date(html), NaiveDate::from_ymd_opt(2019, 5, 13));
+    }
+
+    /// Frequency-then-recency selection (upstream `select`): the runner-up
+    /// wins only when it is nearly as frequent as the newest pattern and
+    /// from a different year.
+    #[test]
+    fn select_runner_up_wins_when_nearly_as_frequent() {
+        let pattern = |text: &str, count: usize| Pattern {
+            text: text.to_string(),
+            count,
+        };
+        // Newest text leads; the older pattern is twice as frequent.
+        let picked = select(vec![pattern("2015", 2), pattern("2019", 1)], year_itself);
+        assert_eq!(picked.map(|p| p.text), Some("2015".to_string()));
+        // Runner-up at 2/3 frequency still wins.
+        let picked = select(vec![pattern("2019", 3), pattern("2015", 2)], year_itself);
+        assert_eq!(picked.map(|p| p.text), Some("2015".to_string()));
+        // Runner-up at 1/3 frequency loses to the newest.
+        let picked = select(vec![pattern("2019", 3), pattern("2015", 1)], year_itself);
+        assert_eq!(picked.map(|p| p.text), Some("2019".to_string()));
     }
 }
