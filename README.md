@@ -197,10 +197,10 @@ Extraction time per document, Rust vs Go ([go-trafilatura](https://github.com/ma
 
 | Document | Rust | Go | Python |
 |----------|-----:|---:|-------:|
-| small (6 KB) | 793 µs | 1.19 ms | 1.1 ms |
-| medium (85 KB) | 5.7 ms | 5.6 ms | 6.2 ms |
-| large (382 KB) | 3.6 ms | 4.9 ms | 4.7 ms |
-| xlarge (906 KB) | 10.4 ms | 13.9 ms | 13.9 ms |
+| small (6 KB) | 687 µs | 1.19 ms | 1.1 ms |
+| medium (85 KB) | 4.85 ms | 5.6 ms | 6.2 ms |
+| large (382 KB) | 2.89 ms | 4.9 ms | 4.7 ms |
+| xlarge (906 KB) | 8.84 ms | 13.9 ms | 13.9 ms |
 
 ### Extraction quality
 
@@ -214,7 +214,7 @@ Evaluated on a 960-entry dataset (strings expected to be present/absent in extra
 
 All three implementations produce near-identical quality scores. Minor differences stem from HTML parser handling and Unicode normalization.
 
-Measured on Apple M4 Max, Rust 1.93, macOS 15.7.
+Measured on Apple M4 Max, Rust 1.99, macOS 15.7.
 
 Reproduce:
 
@@ -223,6 +223,13 @@ cargo bench                                            # speed benchmarks
 cargo test --test comparison_test -- --nocapture       # Rust quality scores
 python3 scripts/compare_python.py > /dev/null          # Python quality (stderr)
 ```
+
+## Acknowledgements
+
+- **[Adrien Barbaresi](https://github.com/adbar)** for [trafilatura](https://github.com/adbar/trafilatura) and [htmldate](https://github.com/adbar/htmldate) — the original Python libraries this crate is ultimately ported from, and the source of the date-extraction algorithm ported into `src/metadata/dates.rs`.
+- **[Markus Mobius](https://github.com/markusmobius)** for [go-trafilatura](https://github.com/markusmobius/go-trafilatura) (the direct porting target), [go-htmldate](https://github.com/markusmobius/go-htmldate)/[rust-htmldate](https://github.com/markusmobius/rust-htmldate) (the Apache-2.0 Rust reference for the date cascade), and the test corpora: the 960-entry comparison dataset (serialized from go-trafilatura's `comparisonData`, itself derived from trafilatura's evaluation data) and the cached-page fixtures in `test-files/mock` used for metadata and date testing.
+
+The date-extraction port is released under Apache-2.0, matching rust-htmldate and htmldate.
 
 ## License
 

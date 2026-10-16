@@ -134,6 +134,14 @@ impl Document {
         }
     }
 
+    /// Returns the text of a Comment node, if this is one.
+    pub fn comment_data(&self, id: NodeId) -> Option<&str> {
+        match self.tree.get(id).map(|n| n.value()) {
+            Some(Node::Comment(t)) => Some(t.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Returns all attribute names for an element.
     pub fn attribute_names(&self, id: NodeId) -> Vec<String> {
         if let Some(Node::Element(e)) = self.tree.get(id).map(|n| n.value()) {
