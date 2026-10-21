@@ -41,6 +41,11 @@ done
 [[ -n "$version" && -n "$bindings" && -n "$output" ]] || { echo "--version, --bindings and --output are required" >&2; exit 1; }
 [[ ${#macos[@]} -gt 0 && ${#ios[@]} -gt 0 && ${#ios_sim[@]} -gt 0 ]] || { echo "dylibs for all three slices are required" >&2; exit 1; }
 
+# App Store validation rejects bundle versions that aren't up to three integers (ITMS-90060),
+# including in embedded frameworks, so a pre-release suffix such as "-fork.1" is dropped.
+bundle_version="${version%%-*}"
+[[ "$bundle_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || { echo "version $version has no numeric X.Y.Z part" >&2; exit 1; }
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -57,8 +62,8 @@ write_info_plist() {
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>$NAME</string>
     <key>CFBundlePackageType</key><string>FMWK</string>
-    <key>CFBundleShortVersionString</key><string>$version</string>
-    <key>CFBundleVersion</key><string>$version</string>
+    <key>CFBundleShortVersionString</key><string>$bundle_version</string>
+    <key>CFBundleVersion</key><string>$bundle_version</string>
     <key>CFBundleSupportedPlatforms</key><array><string>$platform</string></array>
     <key>$min_key</key><string>$min_version</string>
 </dict>
