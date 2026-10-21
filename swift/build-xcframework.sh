@@ -90,6 +90,8 @@ make_binary() {
         thin+=("$copy")
     done
     lipo -create "${thin[@]}" -output "$out"
+    # CI artifacts don't keep file modes, so the dylibs may arrive without the executable bit.
+    chmod 755 "$out"
     check_string_pool_alignment "$out"
 }
 

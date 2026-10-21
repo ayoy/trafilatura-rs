@@ -109,7 +109,10 @@ jobs:
       - name: Package XCFramework
         id: xcframework
         run: |
-          zip -r TrafilaturaFFI.xcframework.zip TrafilaturaFFI.xcframework
+          # The macOS framework is a versioned bundle, so its symlinks must stay symlinks.
+          zip -r --symlinks TrafilaturaFFI.xcframework.zip TrafilaturaFFI.xcframework
+          zipinfo TrafilaturaFFI.xcframework.zip \
+            | grep '^l.* TrafilaturaFFI.xcframework/macos-arm64_x86_64/TrafilaturaFFI.framework/TrafilaturaFFI$' > /dev/null
           CHECKSUM=$(swift package compute-checksum TrafilaturaFFI.xcframework.zip)
           if [[ ! "$CHECKSUM" =~ ^[a-f0-9]{64}$ ]]; then
             echo "Invalid checksum: $CHECKSUM"
